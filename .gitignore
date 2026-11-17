@@ -1,6 +1,7 @@
 # Gradle caches and generated output
 .gradle/
 build/
+fxstudio.properties
 
 # Compiled Java classes
 bin/

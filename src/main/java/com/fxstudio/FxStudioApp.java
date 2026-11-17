@@ -5,8 +5,10 @@ import com.fxstudio.compiler.FxCodeExecutor;
 import com.fxstudio.manager.FxAnimationController;
 import com.fxstudio.manager.FxProjectManager;
 import com.fxstudio.manager.FxSourceManager;
+import com.fxstudio.manager.FxSequenceController;
 import com.fxstudio.model.FxAnimation;
 import com.fxstudio.model.FxFrame;
+import com.fxstudio.model.FxEffectSequence;
 import com.fxstudio.model.FxProject;
 import com.fxstudio.model.FxSettings;
 import com.fxstudio.renderer.FxMeshRenderer;
@@ -39,6 +41,9 @@ public class FxStudioApp extends Application {
     private final FxAnimationController animationController = new FxAnimationController(animation);
     private final FxCodeCompiler compiler = new FxCodeCompiler();
     private final FxCodeExecutor executor = new FxCodeExecutor();
+    private final FxEffectSequence effectSequence = new FxEffectSequence();
+    private final FxSequenceController sequenceController =
+            new FxSequenceController(effectSequence);
 
     private FxProject currentProject;
     private Path lastCompiledDir;
@@ -49,6 +54,8 @@ public class FxStudioApp extends Application {
     private FxMeshRenderer meshRenderer;
     private FxTimeline timeline;
     private FxConsole console;
+    private FxSequencePanel sequencePanel;
+    private boolean sequenceMode;
 
     private Button playPauseButton;
     private Label statusLabel;
@@ -68,6 +75,7 @@ public class FxStudioApp extends Application {
         codeEditor = new FxEditor();
         timeline = new FxTimeline();
         console = new FxConsole();
+        sequencePanel = new FxSequencePanel();
 
         BorderPane root = new BorderPane();
         root.setStyle("-fx-background-color: #111318;");
@@ -81,7 +89,11 @@ public class FxStudioApp extends Application {
         AnimationTimer loop = new AnimationTimer() {
             @Override
             public void handle(long now) {
-                if (animationController.update()) {
+                if (sequenceMode) {
+                    if (sequenceController.update()) {
+                        renderSequenceFrame();
+                    }
+                } else if (animationController.update()) {
                     renderCurrentFrame();
                     timeline.updateSelection();
                 }
@@ -107,6 +119,7 @@ public class FxStudioApp extends Application {
         Button importJavaBtn = createButton("Import .java", "#292e3a");
         Button saveBtn = createButton("Save File", "#292e3a");
         Button compileRenderBtn = createButton("Compile & Render", "#2563eb");
+        Button addToQueueBtn = createButton("Add to Queue", "#7c3aed");
         Button addJarBtn = createButton("Add JAR Dep", "#292e3a");
 
         CheckBox gridCheck = new CheckBox("Grid");
@@ -137,6 +150,7 @@ public class FxStudioApp extends Application {
         importJavaBtn.setOnAction(e -> handleImportJava(stage));
         saveBtn.setOnAction(e -> handleSaveCurrentFile());
         compileRenderBtn.setOnAction(e -> compileAndRenderEffect());
+        addToQueueBtn.setOnAction(e -> compileCurrentEffect(true));
         addJarBtn.setOnAction(e -> handleAddDependency(stage));
 
         Region spacer = new Region();
@@ -150,6 +164,7 @@ public class FxStudioApp extends Application {
                 saveBtn,
                 addJarBtn,
                 compileRenderBtn,
+                addToQueueBtn,
                 spacer,
                 gridCheck,
                 axesCheck,
@@ -184,14 +199,29 @@ public class FxStudioApp extends Application {
         HBox parametersBar = createEffectParametersBar();
         HBox playbackBar = createPlaybackBar();
 
-        console.setPrefHeight(165);
-        console.setMinHeight(110);
+        console.setPrefHeight(125);
+        console.setMinHeight(70);
+
+        // Keep the replay queue visible instead of hiding it in a collapsed pane.
+        TitledPane queuePane = new TitledPane("Effect Replay Queue", sequencePanel);
+        queuePane.setExpanded(true);
+        queuePane.setAnimated(false);
+        queuePane.setCollapsible(false);
+        queuePane.setMinHeight(205);
+        queuePane.setPrefHeight(205);
+        queuePane.setMaxHeight(205);
+        queuePane.setStyle("-fx-text-fill: #e5e7eb;");
+
+        VBox.setVgrow(viewport, Priority.ALWAYS);
+        VBox.setVgrow(queuePane, Priority.NEVER);
+        VBox.setVgrow(console, Priority.SOMETIMES);
 
         VBox panel = new VBox(
                 viewport,
                 parametersBar,
                 playbackBar,
                 timeline,
+                queuePane,
                 console
         );
         panel.setStyle("-fx-background-color: #14171f;");
@@ -235,10 +265,17 @@ public class FxStudioApp extends Application {
         speedBox.setStyle("-fx-background-color: #292e3a; -fx-text-fill: white;");
         speedBox.setOnAction(e -> {
             String raw = speedBox.getValue().replace("x", "");
-            animationController.setPlaybackSpeed(Double.parseDouble(raw));
+            double speed = Double.parseDouble(raw);
+            animationController.setPlaybackSpeed(speed);
+            sequenceController.setPlaybackSpeed(speed);
         });
 
         playPauseButton.setOnAction(e -> {
+            if (sequenceMode) {
+                sequenceController.pause();
+                sequenceMode = false;
+                renderCurrentFrame();
+            }
             if (animationController.isPlaying()) {
                 animationController.pause();
                 playPauseButton.setText("Play");
@@ -249,6 +286,8 @@ public class FxStudioApp extends Application {
         });
 
         resetBtn.setOnAction(e -> {
+            sequenceController.pause();
+            sequenceMode = false;
             animationController.stop();
             playPauseButton.setText("Play");
             renderCurrentFrame();
@@ -256,6 +295,8 @@ public class FxStudioApp extends Application {
         });
 
         prevFrameBtn.setOnAction(e -> {
+            sequenceController.pause();
+            sequenceMode = false;
             animationController.pause();
             playPauseButton.setText("Play");
             animationController.previousFrame();
@@ -264,6 +305,8 @@ public class FxStudioApp extends Application {
         });
 
         nextFrameBtn.setOnAction(e -> {
+            sequenceController.pause();
+            sequenceMode = false;
             animationController.pause();
             playPauseButton.setText("Play");
             animationController.nextFrame();
@@ -318,9 +361,63 @@ public class FxStudioApp extends Application {
         projectExplorer.setOnFileDeleted(this::handleDeleteProjectFile);
 
         timeline.setOnFrameSelected(frameIndex -> {
+            sequenceController.pause();
+            sequenceMode = false;
             animationController.pause();
             playPauseButton.setText("Play");
             renderCurrentFrame();
+        });
+
+        sequencePanel.setOnRemove(index -> {
+            if (index < 0) return;
+            effectSequence.remove(index);
+            sequencePanel.refresh(effectSequence);
+            if (effectSequence.isEmpty() && sequenceMode) {
+                sequenceController.stop();
+                sequenceMode = false;
+                renderCurrentFrame();
+            }
+        });
+
+        sequencePanel.setOnMoveUp(index -> {
+            if (index <= 0) return;
+            effectSequence.move(index, index - 1);
+            sequencePanel.refresh(effectSequence);
+            sequencePanel.select(index - 1);
+        });
+
+        sequencePanel.setOnMoveDown(index -> {
+            if (index < 0 || index >= effectSequence.size() - 1) return;
+            effectSequence.move(index, index + 1);
+            sequencePanel.refresh(effectSequence);
+            sequencePanel.select(index + 1);
+        });
+
+        sequencePanel.setOnLoopChanged(() ->
+                sequenceController.setLoopSequence(sequencePanel.isLoopSelected()));
+
+        sequencePanel.setOnReplay(() -> {
+            if (effectSequence.isEmpty()) {
+                console.warning("A fila de reprodução está vazia.");
+                return;
+            }
+
+            animationController.pause();
+            playPauseButton.setText("Play");
+            sequenceMode = true;
+            sequenceController.setLoopSequence(sequencePanel.isLoopSelected());
+            sequenceController.setPlaybackSpeed(animationController.getPlaybackSpeed());
+            sequenceController.play();
+            renderSequenceFrame();
+            setStatus("Reproduzindo fila de efeitos.");
+        });
+
+        sequencePanel.setOnStop(() -> {
+            sequenceController.stop();
+            sequenceMode = false;
+            renderCurrentFrame();
+            timeline.updateSelection();
+            setStatus("Fila de reprodução parada.");
         });
     }
 
@@ -348,6 +445,15 @@ public class FxStudioApp extends Application {
     }
 
     private void compileAndRenderEffect() {
+        compileCurrentEffect(false);
+    }
+
+    private void compileCurrentEffect(boolean addToQueue) {
+        if (addToQueue && sequenceMode) {
+            sequenceController.pause();
+            sequenceMode = false;
+            renderCurrentFrame();
+        }
         saveActiveEditorSilently();
 
         int duration;
@@ -426,11 +532,40 @@ public class FxStudioApp extends Application {
                 return;
             }
 
+            int totalTris = execResult.frames().stream()
+                    .mapToInt(FxFrame::getTriangleCount)
+                    .sum();
+
+            if (addToQueue) {
+                String effectName = execResult.resolvedClassName();
+                if (effectName == null || effectName.isBlank()) {
+                    Path activeFile = codeEditor.getCurrentFile();
+                    effectName = activeFile != null
+                            ? activeFile.getFileName().toString()
+                            : "Unnamed Effect";
+                }
+
+                effectSequence.add(effectName, execResult.frames(), frameStep);
+                sequencePanel.refresh(effectSequence);
+
+                console.success(String.format(
+                        Locale.ROOT,
+                        "Adicionado à fila: %s (%d frames, %d triângulos).",
+                        effectName,
+                        execResult.frames().size(),
+                        totalTris
+                ));
+                setStatus("Adicionado à fila: " + effectName);
+                return;
+            }
+
+            // Preserve the original single-effect rendering workflow.
+            sequenceController.pause();
+            sequenceMode = false;
             animation.clear();
             animation.addFrames(execResult.frames());
             timeline.setAnimation(animation);
 
-            int totalTris = execResult.frames().stream().mapToInt(FxFrame::getTriangleCount).sum();
             console.success(String.format(
                     Locale.ROOT,
                     "Renderizado %s: %d frames gerados (%d triângulos totais).",
@@ -449,6 +584,15 @@ public class FxStudioApp extends Application {
         } catch (Exception ex) {
             console.error("Erro inesperado: " + ex.getMessage());
         }
+    }
+
+    private void renderSequenceFrame() {
+        FxFrame frame = effectSequence.getCurrentFrame();
+        if (frame == null) {
+            meshRenderer.clear();
+            return;
+        }
+        meshRenderer.render(frame.getTriangles());
     }
 
     private void renderCurrentFrame() {
